@@ -1,0 +1,53 @@
+services:
+  bot:
+    image: greenteeea/kvt-bot:latest
+    container_name: kvt-bot
+    command: ["python", "main.py", "bot"]
+    environment:
+      - TZ=UTC
+      - BOT_TOKEN=8219745332:AAGe44Gse9QMerKk7znlo8xMXoBVMndlLtk
+      - ADMIN_TELEGRAM_CHAT_ID=7558604816
+      - SMTP_HOST=smtp.gmail.com
+      - SMTP_PORT=587
+      - SMTP_USER=sbcargobot@gmail.com
+      - SMTP_PASSWORD=uova hutt outv dzue
+      - GMAIL_APP_PASSWORD=uova hutt outv dzue
+      - DEFAULT_NOTIFICATION_EMAIL=sb@sbcargo.ru
+      - EMAIL_ENABLED=true
+    depends_on:
+      db:
+        condition: service_started
+      mailhog:
+        condition: service_started
+    restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: kvt-mailhog
+    ports:
+      - "1025:1025"  # SMTP
+      - "8025:8025"  # Web UI
+    restart: unless-stopped
+
+
+  db:
+    image: postgres:15
+    container_name: kvt-postgres
+    environment:
+      - POSTGRES_DB=kvtservice
+      - POSTGRES_USER=kvt
+      - POSTGRES_PASSWORD=kvtpassword
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+
+volumes:
+  pgdata:
