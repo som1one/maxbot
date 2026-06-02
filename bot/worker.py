@@ -763,8 +763,8 @@ async def process_email(message):
         encoded_text = urllib.parse.quote(context_text)
         chat_url_with_context = f"{max_chat_url}?text={encoded_text}"
         
-        keyboard = buttons.InlineMarkup([
-            [buttons.InlineButton("Перейти в чат", url=chat_url_with_context)]
+        keyboard = buttons.Markup([
+            [buttons.LinkButton("Перейти в чат", url=chat_url_with_context)]
         ])
         
         await message.send(
@@ -1203,8 +1203,8 @@ async def process_trading_house_final(message):
         encoded_text = urllib.parse.quote(context_text)
         chat_url_with_context = f"{max_chat_url}?text={encoded_text}"
         
-        keyboard = buttons.InlineMarkup([
-            [buttons.InlineButton("Перейти в чат", url=chat_url_with_context)]
+        keyboard = buttons.Markup([
+            [buttons.LinkButton("Перейти в чат", url=chat_url_with_context)]
         ])
         
         await message.send(
@@ -1600,8 +1600,8 @@ async def process_customs_final(message):
         encoded_text = urllib.parse.quote(context_text)
         chat_url_with_context = f"{max_chat_url}?text={encoded_text}"
         
-        keyboard = buttons.InlineMarkup([
-            [buttons.InlineButton("Перейти в чат", url=chat_url_with_context)]
+        keyboard = buttons.Markup([
+            [buttons.LinkButton("Перейти в чат", url=chat_url_with_context)]
         ])
         
         await message.send(
