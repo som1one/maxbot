@@ -1,37 +1,57 @@
-# Telegram Bot with Admin Panel (FastAPI) + PostgreSQL + Docker
+# MaxBot
 
-Replicates core behavior of `@kvtservice_bot`:
-- Collects applications from Telegram users
-- Persists to PostgreSQL
-- Sends each application to a configured Telegram chat ID and to an email selected in admin panel
-- Admin panel (FastAPI) to manage settings and view applications
+Сервис для обработки заявок из Max-мессенджера с FastAPI backend и PostgreSQL.
 
-## Quick start
+## Что внутри
 
-1) Copy environment file
+- `bot`: Max-бот на `aiomax`
+- `app`: FastAPI API для healthcheck и админских endpoint'ов
+- `db`: PostgreSQL для заявок и настроек
+
+## Быстрый старт локально
+
 ```bash
 cp .env.example .env
+docker compose --profile dev up -d --build
 ```
 
-2) Build and run
+После запуска:
+
+- API: `http://localhost:8000/health`
+- MailHog: `http://localhost:8025`
+
+## Основные переменные
+
+- `BOT_TOKEN`: токен Max-бота
+- `ADMIN_MAX_CHAT_ID`: чат для служебных уведомлений
+- `DEFAULT_NOTIFICATION_EMAIL`: email для новых заявок
+- `POSTGRES_*` или `DATABASE_URL`: подключение к PostgreSQL
+- `SMTP_*`: SMTP-конфиг для отправки писем
+- `EMAIL_ENABLED`: включает email-уведомления
+
+## Запуск без Docker
+
 ```bash
-docker compose up -d --build
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+python main.py backend
+python main.py bot
 ```
 
-3) Open admin web UI: `http://localhost:8000` (docs at `/docs`)
-   - Basic auth with `ADMIN_USERNAME`/`ADMIN_PASSWORD`
+Рекомендуемая версия Python для локального запуска: `3.12`.
 
-## Services
-- backend: FastAPI app (admin panel + REST)
-- bot: Telegram bot worker (aiogram)
-- db: PostgreSQL
-- mailhog: local email testing (web UI at http://localhost:8025)
+## Полезные команды
 
-## Tech stack
-- FastAPI, SQLAlchemy 2.0
-- aiogram 3.x
-- Postgres 15
-- Uvicorn
+```bash
+docker compose ps
+docker compose logs -f bot
+docker compose logs -f backend
+docker compose exec db psql -U "$POSTGRES_USER" "$POSTGRES_DB"
+```
 
-## Configuration
-See `.env.example` for all options.
+## Важно
+
+- Не храните секреты в git. Используйте только локальный `.env`.
+- Для production используйте [DEPLOYMENT.md](/Users/cultim/Documents/maxbot/DEPLOYMENT.md).

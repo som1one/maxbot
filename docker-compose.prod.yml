@@ -1,0 +1,8 @@
+services:
+  backend:
+    environment:
+      ENV: production
+
+  bot:
+    environment:
+      ENV: production

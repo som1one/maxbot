@@ -1,30 +1,46 @@
 import logging
 import os
 import smtplib
+import ssl
+from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from dotenv import load_dotenv
+import aiohttp
+import certifi
 from aiomax import Bot, buttons
 from aiomax.fsm import FSMCursor
+from app.config import settings
+import urllib.parse
+from .bitrix import send_to_bitrix24
 
-# Load environment variables
-load_dotenv("local.env")
+# Use certifi CA bundle by default so Max API TLS verification works
+# in environments where the system trust store is incomplete or proxied.
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+
+# aiomax accepts keyboards as plain nested button lists.
+# Keep the existing code shape from the legacy bot port by normalizing
+# Markup(...) calls into a passthrough helper when the attribute is absent.
+if not hasattr(buttons, "Markup"):
+    buttons.Markup = lambda rows: rows
 
 # Bot token and admin chat ID
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_MAX_CHAT_ID", os.getenv("ADMIN_TELEGRAM_CHAT_ID", "0")))
+BOT_TOKEN = settings.bot_token
+ADMIN_CHAT_ID = settings.admin_chat_id
 
 # Debug logging
 logging.info(f"BOT_TOKEN: {BOT_TOKEN[:10]}..." if BOT_TOKEN else "BOT_TOKEN: not set")
 logging.info(f"ADMIN_CHAT_ID: {ADMIN_CHAT_ID}")
 
 # Email settings
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "sbcargobot@gmail.com")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "1Qqazxsw55")
-ADMIN_EMAIL = os.getenv("DEFAULT_NOTIFICATION_EMAIL", "sb@sbcargo.ru")
-EMAIL_ENABLED = os.getenv("EMAIL_ENABLED", "true").lower() == "true"
+SMTP_HOST = settings.smtp_host
+SMTP_PORT = settings.smtp_port
+SMTP_USER = settings.smtp_user or ""
+SMTP_FROM = settings.resolved_smtp_from
+SMTP_PASSWORD = settings.smtp_login_password or ""
+ADMIN_EMAIL = settings.default_notification_email or ""
+EMAIL_ENABLED = settings.email_enabled
+STARTUP_EMAIL_TEST = settings.startup_email_test
 
 # Alternative SMTP servers for fallback
 SMTP_ALTERNATIVES = [
@@ -71,9 +87,17 @@ def send_email(subject: str, body: str, to_email: str = ADMIN_EMAIL):
     if not EMAIL_ENABLED:
         logging.warning("⚠️ Email notifications are DISABLED")
         return False
+
+    if not to_email:
+        logging.warning("⚠️ Recipient email is not configured")
+        return False
+
+    if not SMTP_HOST:
+        logging.warning("⚠️ SMTP host is not configured")
+        return False
     
     logging.info(f"📧 Email details:")
-    logging.info(f"   📤 From: {SMTP_USER}")
+    logging.info(f"   📤 From: {SMTP_FROM}")
     logging.info(f"   📥 To: {to_email}")
     logging.info(f"   📝 Subject: {subject}")
     logging.info(f"   📄 Body length: {len(body)} characters")
@@ -81,25 +105,24 @@ def send_email(subject: str, body: str, to_email: str = ADMIN_EMAIL):
     # Use Gmail App Password method (proven to work)
     try:
         # Gmail settings
-        smtp_server = "smtp.gmail.com"
-        sender_email = SMTP_USER
+        smtp_server = SMTP_HOST
+        sender_email = SMTP_USER or SMTP_FROM
         
         # Use Gmail App Password from environment (sanitize spaces)
-        raw_app_password = os.getenv("GMAIL_APP_PASSWORD", SMTP_PASSWORD) or ""
-        app_password = raw_app_password.replace(" ", "")
+        app_password = SMTP_PASSWORD
         logging.info(f"🔐 Using App Password: {app_password[:4]}****{app_password[-4:] if len(app_password) >= 8 else '****'}")
         
         # Create message
         logging.info("📝 Creating email message...")
         msg = MIMEMultipart()
-        msg['From'] = sender_email
+        msg['From'] = SMTP_FROM
         msg['To'] = to_email
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'html', 'utf-8'))
         
         # Try STARTTLS (587) first
         try:
-            smtp_port = 587
+            smtp_port = SMTP_PORT if SMTP_PORT != 465 else 587
             logging.info("🔗 Connecting to Gmail SMTP (STARTTLS)...")
             logging.info(f"   🌐 Server: {smtp_server}")
             logging.info(f"   🔌 Port: {smtp_port}")
@@ -109,21 +132,23 @@ def send_email(subject: str, body: str, to_email: str = ADMIN_EMAIL):
             logging.info("🔒 Starting TLS encryption...")
             server.starttls()
             server.ehlo()
-            logging.info("🔑 Authenticating with Gmail (STARTTLS)...")
-            server.login(sender_email, app_password)
-            logging.info("✅ Gmail authentication successful (STARTTLS)!")
+            if sender_email and app_password:
+                logging.info("🔑 Authenticating with Gmail (STARTTLS)...")
+                server.login(sender_email, app_password)
+                logging.info("✅ Gmail authentication successful (STARTTLS)!")
         except Exception as e_starttls:
             logging.warning(f"⚠️ STARTTLS failed: {e_starttls}")
             # Try SSL (465)
-            smtp_port = 465
+            smtp_port = 465 if SMTP_PORT == 465 else SMTP_PORT
             logging.info("🔗 Connecting to Gmail SMTP (SSL)...")
             logging.info(f"   🌐 Server: {smtp_server}")
             logging.info(f"   🔌 Port: {smtp_port}")
             server = smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=20)
             server.set_debuglevel(0)
-            logging.info("🔑 Authenticating with Gmail (SSL)...")
-            server.login(sender_email, app_password)
-            logging.info("✅ Gmail authentication successful (SSL)!")
+            if sender_email and app_password:
+                logging.info("🔑 Authenticating with Gmail (SSL)...")
+                server.login(sender_email, app_password)
+                logging.info("✅ Gmail authentication successful (SSL)!")
         
         logging.info("📤 Sending email message...")
         server.send_message(msg)
@@ -148,7 +173,7 @@ def send_email(subject: str, body: str, to_email: str = ADMIN_EMAIL):
         # HTTPS fallback: Resend API (works over port 443)
         try:
             import requests
-            resend_key = os.getenv('RESEND_API_KEY')
+            resend_key = settings.resend_api_key
             if resend_key:
                 logging.info("🌐 Trying HTTPS fallback via Resend API...")
                 resend_url = "https://api.resend.com/emails"
@@ -157,7 +182,7 @@ def send_email(subject: str, body: str, to_email: str = ADMIN_EMAIL):
                     "Content-Type": "application/json"
                 }
                 payload = {
-                    "from": f"KVT Bot <{SMTP_USER}>",
+                    "from": f"KVT Bot <{SMTP_FROM}>",
                     "to": [to_email],
                     "subject": subject,
                     "html": body
@@ -179,7 +204,7 @@ def send_email(subject: str, body: str, to_email: str = ADMIN_EMAIL):
             logging.info("🔗 Connecting to MailHog...")
             server = smtplib.SMTP("mailhog", 1025, timeout=5)
             logging.info("📤 Sending via MailHog...")
-            server.sendmail(SMTP_USER, to_email, msg.as_string())
+            server.sendmail(SMTP_FROM, to_email, msg.as_string())
             server.quit()
             logging.info("✅ Email sent via MailHog fallback!")
             logging.info("   🌐 Check MailHog UI: http://localhost:8025")
@@ -197,6 +222,8 @@ def send_email(subject: str, body: str, to_email: str = ADMIN_EMAIL):
 # FSM States - используем строковые константы вместо StatesGroup
 class ApplicationStates:
     waiting_for_address = "waiting_for_address"
+    waiting_for_company = "waiting_for_company"
+    waiting_for_inn = "waiting_for_inn"
     waiting_for_phone = "waiting_for_phone"
     waiting_for_email = "waiting_for_email"
     waiting_for_service = "waiting_for_service"
@@ -224,30 +251,79 @@ class ApplicationStates:
     waiting_for_edit_field = "waiting_for_edit_field"
 
 
+TRADING_HOUSE_SERVICE = "Торговый дом (закупка товаров)"
+
+
 # Helper function to get FSM cursor
 def get_state(message) -> FSMCursor:
     """Получить FSM cursor для пользователя"""
-    user_id = message.sender.user_id if message.sender else message.recipient.chat_id
+    sender = getattr(message, "sender", None)
+    recipient = getattr(message, "recipient", None)
+    user_id = sender.user_id if sender else recipient.chat_id
     return FSMCursor(bot.storage, user_id)
 
 
-@bot.on_message(detect_commands=True)
-async def start(message):
-    text = (message.body.text if message.body else "").strip()
-    if not text.startswith("/start"):
-        return False
-    state = get_state(message)
-    state.clear()
-    
+def get_message_text(message) -> str:
+    """Безопасно получить и очистить текст сообщения из Max."""
+    if not message or not message.body or not message.body.text:
+        return ""
+    return message.body.text.strip()
+
+
+def get_sender_display(message) -> str:
+    """Вернуть username с @ или человекочитаемый fallback."""
+    sender = getattr(message, "sender", None)
+    if sender and sender.username:
+        return f"@{sender.username}"
+    return "Не указан"
+
+
+def get_chat_id(message):
+    recipient = getattr(message, "recipient", None)
+    return recipient.chat_id if recipient else None
+
+
+def get_sender_id(message):
+    sender = getattr(message, "sender", None)
+    return sender.user_id if sender else None
+
+
+def format_message_timestamp(message) -> str:
+    timestamp = getattr(message, "timestamp", None)
+    if not timestamp:
+        return "N/A"
+    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def is_trading_house_service(service_name: str | None) -> bool:
+    return service_name == TRADING_HOUSE_SERVICE
+
+
+async def send_start_menu(target, user_id: int):
+    logging.info("📨 Sending start menu to user_id=%s", user_id)
+    FSMCursor(bot.storage, user_id).clear()
     keyboard = buttons.Markup([
         [buttons.MessageButton("Юр. лица и ИП")],
         [buttons.MessageButton("Физ. лица")]
     ])
     
-    await message.send(
+    await target.send(
         "Добрый день! Подскажите, пожалуйста, Вас интересуют услуги как:",
         keyboard=keyboard
     )
+    logging.info("✅ Start menu sent to user_id=%s", user_id)
+
+
+@bot.on_bot_start()
+async def handle_bot_started(payload):
+    logging.info("🚀 bot_started event chat_id=%s user_id=%s", payload.chat_id, payload.user_id)
+    await send_start_menu(payload, payload.user_id)
+
+
+@bot.on_command("start")
+async def start_command(ctx):
+    logging.info("⌨️ /start command chat_id=%s user_id=%s", ctx.recipient.chat_id, ctx.user_id)
+    await send_start_menu(ctx, ctx.user_id)
 
 
 @bot.on_message()
@@ -258,7 +334,7 @@ async def process_address(message):
     if current_state != ApplicationStates.waiting_for_address:
         return False
     
-    address = message.body.text.strip() if message.body and message.body.text else ""
+    address = get_message_text(message)
     
     if len(address) < 2:
         await message.send("❌ Пожалуйста, введите корректное обращение:")
@@ -266,6 +342,50 @@ async def process_address(message):
     
     data = state.get_data() or {}
     data["address"] = address
+    state.change_data(data)
+    
+    keyboard = buttons.Markup([])
+    
+    await message.send(
+        "Название вашей компании:",
+        keyboard=keyboard
+    )
+    state.change_state(ApplicationStates.waiting_for_company)
+    return True
+
+@bot.on_message()
+async def process_company(message):
+    state = get_state(message)
+    if state.get_state() != ApplicationStates.waiting_for_company:
+        return False
+        
+    company = get_message_text(message)
+    if len(company) < 2:
+        await message.send("❌ Пожалуйста, введите корректное название компании:")
+        return True
+        
+    data = state.get_data() or {}
+    data["company"] = company
+    state.change_data(data)
+    
+    keyboard = buttons.Markup([])
+    await message.send("Введите ИНН вашей компании:", keyboard=keyboard)
+    state.change_state(ApplicationStates.waiting_for_inn)
+    return True
+
+@bot.on_message()
+async def process_inn(message):
+    state = get_state(message)
+    if state.get_state() != ApplicationStates.waiting_for_inn:
+        return False
+        
+    inn = get_message_text(message)
+    if len(inn) < 9:
+        await message.send("❌ Пожалуйста, введите корректный ИНН:")
+        return True
+        
+    data = state.get_data() or {}
+    data["inn"] = inn
     state.change_data(data)
     
     keyboard = buttons.Markup([
@@ -292,7 +412,8 @@ async def process_phone_submission(message):
     
     if current_state != ApplicationStates.waiting_for_phone:
         return False
-    if message.body.text if message.body else "" == "✅ Отправить заявку":
+    text = get_message_text(message)
+    if text == "✅ Отправить заявку":
         logging.info("=" * 60)
         logging.info("📋 APPLICATION SUBMISSION STARTED")
         logging.info("=" * 60)
@@ -308,7 +429,7 @@ async def process_phone_submission(message):
         email = data.get('email', 'Не указан')
         
         # Get username for both admin notification and email
-        username = message.sender.username if message.sender and message.sender.username else "Не указан"
+        username = get_sender_display(message)
         
         logging.info("📋 Application data collected:")
         logging.info(f"   👤 Name: {name}")
@@ -316,10 +437,10 @@ async def process_phone_submission(message):
         logging.info(f"   🏷️ User Type: {user_type}")
         logging.info(f"   🔧 Service: {selected_service}")
         logging.info(f"   📞 Phone: {phone}")
-        logging.info(f"   👤 Username: @{username}")
+        logging.info(f"   👤 Username: {username}")
         logging.info(f"   💬 Message: {user_message_text}")
-        logging.info(f"   🆔 Chat ID: {message.recipient.chat_id if message.recipient else None}")
-        logging.info(f"   👤 User ID: {message.sender.user_id if message.sender else 'Unknown'}")
+        logging.info(f"   🆔 Chat ID: {get_chat_id(message)}")
+        logging.info(f"   👤 User ID: {get_sender_id(message) or 'Unknown'}")
         
         # Show processing message
         await message.send("⏳ Обрабатываем вашу заявку...", format="html")
@@ -346,7 +467,7 @@ async def process_phone_submission(message):
                     f"📝 <b>Обращение:</b> {address}\n"
                     f"📞 <b>Телефон:</b> {phone}\n"
                     f"📧 <b>Email:</b> {email}\n"
-                    f"👤 <b>Username:</b> @{username}\n\n"
+                    f"👤 <b>Username:</b> {username}\n\n"
                     f"📦 <b>Товар:</b> {product_name}\n"
                     f"🚛 <b>Логистика:</b> {logistics_interest}\n"
                     f"⚖️ <b>Вес:</b> {cargo_weight}\n"
@@ -365,12 +486,12 @@ async def process_phone_submission(message):
                     f"📧 <b>Email:</b> {email}\n"
                     f"🔧 <b>Услуга:</b> {selected_service}\n"
                     f"💬 <b>Сообщение:</b> {user_message_text}\n"
-                    f"👤 <b>Username:</b> @{username}"
+                    f"👤 <b>Username:</b> {username}"
                 )
             
             await notify_admin(text)
         
-        # Send email notification (with fallback to Telegram only)
+        # Send email notification (with fallback to admin chat only)
         email_sent = False
         try:
             email_subject = f"Новая заявка - {selected_service}"
@@ -385,7 +506,7 @@ async def process_phone_submission(message):
                 <p><strong>Email:</strong> {email}</p>
                 <p><strong>Услуга:</strong> {selected_service}</p>
                 <p><strong>Сообщение:</strong> {user_message_text}</p>
-                <p><strong>Username:</strong> @{username}</p>
+                <p><strong>Username:</strong> {username}</p>
             </body>
             </html>
             """
@@ -407,7 +528,7 @@ async def process_phone_submission(message):
                 <p><strong>Обращение:</strong> {address}</p>
                 <p><strong>Телефон:</strong> {phone}</p>
                 <p><strong>Email:</strong> {email}</p>
-                <p><strong>Username:</strong> @{username}</p>
+                <p><strong>Username:</strong> {username}</p>
                 <hr>
                 <h3>Детали заявки:</h3>
                 <p><strong>Товар:</strong> {product_name}</p>
@@ -425,13 +546,13 @@ async def process_phone_submission(message):
             logging.info(f"   📝 Subject: {email_subject}")
             logging.info(f"   📄 Body length: {len(email_body)} characters")
             
-            email_sent = send_email(email_subject, email_body, "sb@sbcargo.ru")
+            email_sent = send_email(email_subject, email_body, ADMIN_EMAIL)
             if email_sent:
                 logging.info("✅ Email notification sent successfully!")
                 logging.info("   📧 Check admin email inbox")
             else:
                 logging.warning("❌ Email notification failed!")
-                logging.warning("   📱 But Telegram notification was sent")
+                logging.warning("   📱 But admin chat notification was sent")
         except Exception as e:
             logging.error("💥 Failed to send email notification!")
             logging.exception(f"   🚨 Error: {e}")
@@ -452,11 +573,15 @@ async def process_phone_submission(message):
             keyboard=keyboard,
             format="html"
         )
+        
+        import asyncio
+        asyncio.create_task(send_to_bitrix24(data))
+        
         state.clear()
         return True
     
     # If not "Отправить заявку", treat as phone input
-    phone = message.body.text if message.body else "".strip()
+    phone = text
     
     # Validate phone input
     if len(phone) < 10:
@@ -471,7 +596,7 @@ async def process_phone_submission(message):
     
     await message.send(
         f"✅ <b>Телефон:</b> {phone}\n\n"
-        f"📧 <b>Введите ваш email адрес:</b>",
+        f"📧 <b>Введите ваш email адрес (с пометкой «рабочий»):</b>",
         keyboard=keyboard,
         format="html"
     )
@@ -489,7 +614,7 @@ async def process_email(message):
         return False
     
     # Check if user clicked "Отправить заявку"
-    text = (message.body.text if message.body else "").strip()
+    text = get_message_text(message)
     if text == "✅ Отправить заявку":
         logging.info("=" * 60)
         logging.info("📋 APPLICATION SUBMISSION STARTED (from email handler)")
@@ -506,7 +631,7 @@ async def process_email(message):
         email = data.get('email', 'Не указан')
         
         # Get username
-        username = message.sender.username if message.sender and message.sender.username else "Не указан"
+        username = get_sender_display(message)
         
         # Show processing message
         await message.send("⏳ Обрабатываем вашу заявку...", format="html")
@@ -528,7 +653,7 @@ async def process_email(message):
                     f"📝 <b>Обращение:</b> {address}\n"
                     f"📞 <b>Телефон:</b> {phone}\n"
                     f"📧 <b>Email:</b> {email}\n"
-                    f"👤 <b>Username:</b> @{username}\n\n"
+                    f"👤 <b>Username:</b> {username}\n\n"
                     f"📦 <b>Товар:</b> {product_name}\n"
                     f"🚛 <b>Логистика:</b> {logistics_interest}\n"
                     f"⚖️ <b>Вес:</b> {cargo_weight}\n"
@@ -547,7 +672,7 @@ async def process_email(message):
                     f"📧 <b>Email:</b> {email}\n"
                     f"🔧 <b>Услуга:</b> {selected_service}\n"
                     f"💬 <b>Сообщение:</b> {user_message_text}\n"
-                    f"👤 <b>Username:</b> @{username}"
+                    f"👤 <b>Username:</b> {username}"
                 )
             
             await notify_admin(text)
@@ -572,7 +697,7 @@ async def process_email(message):
                     <p><strong>Обращение:</strong> {address}</p>
                     <p><strong>Телефон:</strong> {phone}</p>
                     <p><strong>Email:</strong> {email}</p>
-                    <p><strong>Username:</strong> @{username}</p>
+                    <p><strong>Username:</strong> {username}</p>
                     <hr>
                     <h3>Детали заявки:</h3>
                     <p><strong>Товар:</strong> {product_name}</p>
@@ -597,12 +722,12 @@ async def process_email(message):
                     <p><strong>Email:</strong> {email}</p>
                     <p><strong>Услуга:</strong> {selected_service}</p>
                     <p><strong>Сообщение:</strong> {user_message_text}</p>
-                    <p><strong>Username:</strong> @{username}</p>
+                    <p><strong>Username:</strong> {username}</p>
                 </body>
                 </html>
                 """
             
-            send_email(email_subject, email_body, "sb@sbcargo.ru")
+            send_email(email_subject, email_body, ADMIN_EMAIL)
         except Exception as e:
             logging.exception("Failed to send email notification: %s", e)
         
@@ -622,17 +747,56 @@ async def process_email(message):
             format="html"
         )
         
+        import asyncio
+        asyncio.create_task(send_to_bitrix24(data))
+        
+        state.clear()
+        return True
+        
+    elif text == "📞 Позвать менеджера":
+        data = state.get_data() or {}
+        selected_service = data.get('selected_service', 'Не указана')
+        
+        # Max Chat URL generation with context
+        max_chat_url = settings.max_chat_url or "https://example.com/max-chat"
+        context_text = f"Заявка из бота.\nУслуга: {selected_service}"
+        encoded_text = urllib.parse.quote(context_text)
+        chat_url_with_context = f"{max_chat_url}?text={encoded_text}"
+        
+        keyboard = buttons.InlineMarkup([
+            [buttons.InlineButton("Перейти в чат", url=chat_url_with_context)]
+        ])
+        
+        await message.send(
+            f"📞 <b>Связь с менеджером</b>\n\n"
+            f"Пожалуйста, нажмите на кнопку ниже, чтобы перейти в чат с нашим менеджером. "
+            f"Мы уже передали ему контекст вашей заявки!",
+            keyboard=keyboard,
+            format="html"
+        )
+        
+        # Send admin notification so they also know
+        admin_text = (
+            f"📞 <b>Запрос связи с менеджером (Макс чат)</b>\n\n"
+            f"Услуга: {selected_service}\n"
+            f"Имя: {data.get('address', 'Не указано')}\n"
+            f"Username: {get_sender_display(message)}"
+        )
+        import asyncio
+        asyncio.create_task(notify_admin(admin_text))
+        
         state.clear()
         return True
     
-    # If not "Отправить заявку", treat as email input
-    email = (message.body.text if message.body else "").strip()
+    # If not "Отправить заявку" or "Позвать менеджера", treat as email input
+    email = text
     data = state.get_data() or {}
     data["email"] = email
     state.change_data(data)
     
     keyboard = buttons.Markup([
-        [buttons.MessageButton("✅ Отправить заявку")]
+        [buttons.MessageButton("✅ Отправить заявку")],
+        [buttons.MessageButton("📞 Позвать менеджера")]
     ])
     
     data = state.get_data() or {}
@@ -659,7 +823,7 @@ async def process_service_selection(message):
     
     if current_state != ApplicationStates.waiting_for_service:
         return False
-    service_text = message.body.text if message.body else "".strip()
+    service_text = get_message_text(message)
     
     if service_text == "❌ Отмена":
         state.clear()
@@ -704,7 +868,7 @@ async def process_service_selection(message):
         )
         state.change_state(ApplicationStates.waiting_for_message)
     
-    elif service_text == "Торговый дом (закупка товаров)":
+    elif service_text == TRADING_HOUSE_SERVICE:
         # Trading house - start detailed questionnaire
         data = state.get_data() or {}
         data["selected_service"] = service_text
@@ -749,7 +913,7 @@ async def process_message(message):
     
     if current_state != ApplicationStates.waiting_for_message:
         return False
-    user_message = message.body.text if message.body else "".strip()
+    user_message = get_message_text(message)
     
     if user_message == "❌ Отмена":
         state.clear()
@@ -792,7 +956,7 @@ async def process_product(message):
     
     if current_state != ApplicationStates.waiting_for_product:
         return False
-    product = message.body.text if message.body else "".strip()
+    product = get_message_text(message)
     
     if product == "❌ Отмена":
         state.clear()
@@ -829,7 +993,7 @@ async def process_country(message):
     
     if current_state != ApplicationStates.waiting_for_country:
         return False
-    country = message.body.text if message.body else "".strip()
+    country = get_message_text(message)
     
     if country == "❌ Отмена":
         state.clear()
@@ -866,7 +1030,7 @@ async def process_amount(message):
     
     if current_state != ApplicationStates.waiting_for_amount:
         return False
-    amount = message.body.text if message.body else "".strip()
+    amount = get_message_text(message)
     
     if amount == "❌ Отмена":
         state.clear()
@@ -925,7 +1089,7 @@ async def process_currency(message):
     
     if current_state != ApplicationStates.waiting_for_currency:
         return False
-    currency = message.body.text if message.body else "".strip()
+    currency = get_message_text(message)
     
     if currency == "❌ Отмена":
         state.clear()
@@ -975,7 +1139,7 @@ async def process_trading_house_final(message):
     
     if current_state != ApplicationStates.waiting_for_trading_house_message:
         return False
-    final_choice = message.body.text if message.body else "".strip()
+    final_choice = get_message_text(message)
     
     if final_choice == "❌ Отмена":
         state.clear()
@@ -1078,7 +1242,7 @@ async def process_trading_house_final(message):
 # Handle main menu button
 @bot.on_message()
 async def handle_main_menu(message):
-    text = (message.body.text if message.body else "").strip()
+    text = get_message_text(message)
     if text != "🏠 Главное меню":
         return False
     
@@ -1101,12 +1265,12 @@ async def handle_main_menu(message):
 # Handle user type selection
 @bot.on_message()
 async def handle_user_type(message):
-    text = (message.body.text if message.body else "").strip()
+    text = get_message_text(message)
     if text not in ["Юр. лица и ИП", "Физ. лица"]:
         return False
     
     state = get_state(message)
-    user_type = message.body.text if message.body else ""
+    user_type = text
     
     if user_type == "Физ. лица":
         await message.send(
@@ -1140,7 +1304,7 @@ async def process_product_name(message):
     
     if current_state != ApplicationStates.waiting_for_product_name:
         return False
-    product_name = message.body.text if message.body else "".strip()
+    product_name = get_message_text(message)
     
     if len(product_name) < 2:
         await message.send("❌ Пожалуйста, введите корректное наименование товара:")
@@ -1171,7 +1335,7 @@ async def process_logistics_interest(message):
     
     if current_state != ApplicationStates.waiting_for_logistics_interest:
         return False
-    interest = message.body.text if message.body else "".strip()
+    interest = get_message_text(message)
     
     if interest not in ["Да", "Нет"]:
         await message.send("❌ Пожалуйста, выберите Да или Нет:")
@@ -1199,7 +1363,7 @@ async def process_cargo_weight(message):
     
     if current_state != ApplicationStates.waiting_for_cargo_weight:
         return False
-    weight = message.body.text if message.body else "".strip()
+    weight = get_message_text(message)
     
     if len(weight) < 1:
         await message.send("❌ Пожалуйста, введите вес товара:")
@@ -1227,7 +1391,7 @@ async def process_pickup_location(message):
     
     if current_state != ApplicationStates.waiting_for_pickup_location:
         return False
-    pickup = message.body.text if message.body else "".strip()
+    pickup = get_message_text(message)
     
     if len(pickup) < 2:
         await message.send("❌ Пожалуйста, введите место забора груза:")
@@ -1255,7 +1419,7 @@ async def process_delivery_location(message):
     
     if current_state != ApplicationStates.waiting_for_delivery_location:
         return False
-    delivery = message.body.text if message.body else "".strip()
+    delivery = get_message_text(message)
     
     if len(delivery) < 2:
         await message.send("❌ Пожалуйста, введите место доставки:")
@@ -1283,7 +1447,7 @@ async def process_customs_location(message):
     
     if current_state != ApplicationStates.waiting_for_customs_location:
         return False
-    customs_location = message.body.text if message.body else "".strip()
+    customs_location = get_message_text(message)
     
     data = state.get_data() or {}
     data["customs_location"] = customs_location
@@ -1307,7 +1471,7 @@ async def process_special_conditions(message):
     
     if current_state != ApplicationStates.waiting_for_special_conditions:
         return False
-    special_conditions = message.body.text if message.body else "".strip()
+    special_conditions = get_message_text(message)
     
     data = state.get_data() or {}
     data["special_conditions"] = special_conditions
@@ -1348,7 +1512,7 @@ async def process_customs_final(message):
     
     if current_state != ApplicationStates.waiting_for_customs_final:
         return False
-    final_choice = message.body.text if message.body else "".strip()
+    final_choice = get_message_text(message)
     
     if final_choice == "✅ Отправить заявку":
         # Ask for phone before submission
@@ -1454,7 +1618,7 @@ async def process_manager_phone(message):
     if current_state != ApplicationStates.waiting_for_manager_phone:
         return False
     """Handle phone number input for manager transfer"""
-    phone = message.body.text if message.body else "".strip()
+    phone = get_message_text(message)
     
     # Validate phone input
     if len(phone) < 10:
@@ -1484,7 +1648,7 @@ async def process_manager_contact(message):
     if current_state != ApplicationStates.waiting_for_manager_contact:
         return False
     """Handle contact information and send manager notification"""
-    contact = message.body.text if message.body else "".strip()
+    contact = get_message_text(message)
     
     # Accept any input as contact (no validation)
     data = state.get_data() or {}
@@ -1494,7 +1658,7 @@ async def process_manager_contact(message):
     # Get all data
     data = state.get_data() or {}
     address = data.get('address', 'Не указано')
-    username = message.sender.username if message.sender and message.sender.username else "Не указан"
+    username = get_sender_display(message)
     manager_phone = data.get('manager_phone', 'Не указан')
     selected_service = data.get('selected_service', 'Не указана')
     
@@ -1518,7 +1682,7 @@ async def process_manager_contact(message):
                 f"👤 <b>Обращение:</b> {address}\n"
                 f"📞 <b>Телефон:</b> {manager_phone}\n"
                 f"📧 <b>Email:</b> {contact}\n"
-                f"👤 <b>Username:</b> @{username}\n\n"
+                f"👤 <b>Username:</b> {username}\n\n"
                 f"📦 <b>Товар:</b> {product_name}\n"
                 f"🚛 <b>Логистика:</b> {logistics_interest}\n"
                 f"⚖️ <b>Вес:</b> {cargo_weight}\n"
@@ -1540,7 +1704,7 @@ async def process_manager_contact(message):
                 <p><strong>Обращение:</strong> {address}</p>
                 <p><strong>Телефон:</strong> {manager_phone}</p>
                 <p><strong>Email:</strong> {contact}</p>
-                <p><strong>Username:</strong> @{username}</p>
+                <p><strong>Username:</strong> {username}</p>
                 <hr>
                 <h3>Детали заявки:</h3>
                 <p><strong>Товар:</strong> {product_name}</p>
@@ -1555,56 +1719,96 @@ async def process_manager_contact(message):
             </body>
             </html>
             """
-            send_email(email_subject, email_body, "sb@sbcargo.ru")
+            send_email(email_subject, email_body, ADMIN_EMAIL)
         except Exception as e:
             logging.exception("Failed to send manager call email: %s", e)
     
     else:
         # Trading house or other services
-        product = data.get('product', 'Не указан')
-        country = data.get('country', 'Не указана')
-        amount = data.get('amount', 'Не указана')
-        currency = data.get('currency', 'Не указана')
+        data = state.get_data() or {}
+        user_message_text = data.get('user_message')
         
-        # Notify admin about manager call
-        if ADMIN_CHAT_ID and ADMIN_CHAT_ID != 0:
-            text = (
-                f"📞 <b>ПОЗВАТЬ МЕНЕДЖЕРА - {selected_service}</b>\n\n"
-                f"👤 <b>Обращение:</b> {address}\n"
-                f"📞 <b>Телефон:</b> {manager_phone}\n"
-                f"📧 <b>Email:</b> {contact}\n"
-                f"👤 <b>Username:</b> @{username}\n\n"
-                f"📦 <b>Товар:</b> {product}\n"
-                f"🌍 <b>Страна:</b> {country}\n"
-                f"💰 <b>Сумма:</b> {amount} {currency}\n\n"
-                f"🔔 <b>КЛИЕНТ ПРОСИТ СВЯЗАТЬСЯ С МЕНЕДЖЕРОМ!</b>"
-            )
-            await notify_admin(text)
-        
-        # Send email notification
-        try:
-            email_subject = f"📞 Позвать менеджера - {selected_service}"
-            email_body = f"""
-            <html>
-            <body>
-                <h2>📞 ПОЗВАТЬ МЕНЕДЖЕРА - {selected_service}</h2>
-                <p><strong>Обращение:</strong> {address}</p>
-                <p><strong>Телефон:</strong> {manager_phone}</p>
-                <p><strong>Email:</strong> {contact}</p>
-                <p><strong>Username:</strong> @{username}</p>
-                <hr>
-                <h3>Детали заявки:</h3>
-                <p><strong>Товар:</strong> {product}</p>
-                <p><strong>Страна:</strong> {country}</p>
-                <p><strong>Сумма:</strong> {amount} {currency}</p>
-                <hr>
-                <p><strong>🔔 КЛИЕНТ ПРОСИТ СВЯЗАТЬСЯ С МЕНЕДЖЕРОМ!</strong></p>
-            </body>
-            </html>
-            """
-            send_email(email_subject, email_body, "sb@sbcargo.ru")
-        except Exception as e:
-            logging.exception("Failed to send manager call email: %s", e)
+        if user_message_text:
+            # Regular service
+            if ADMIN_CHAT_ID and ADMIN_CHAT_ID != 0:
+                text = (
+                    f"📞 <b>ПОЗВАТЬ МЕНЕДЖЕРА - {selected_service}</b>\n\n"
+                    f"👤 <b>Обращение:</b> {address}\n"
+                    f"📞 <b>Телефон:</b> {manager_phone}\n"
+                    f"📧 <b>Email:</b> {contact}\n"
+                    f"👤 <b>Username:</b> {username}\n\n"
+                    f"💬 <b>Запрос:</b> {user_message_text}\n\n"
+                    f"🔔 <b>КЛИЕНТ ПРОСИТ СВЯЗАТЬСЯ С МЕНЕДЖЕРОМ!</b>"
+                )
+                await notify_admin(text)
+            
+            try:
+                email_subject = f"📞 Позвать менеджера - {selected_service}"
+                email_body = f"""
+                <html>
+                <body>
+                    <h2>📞 ПОЗВАТЬ МЕНЕДЖЕРА - {selected_service}</h2>
+                    <p><strong>Обращение:</strong> {address}</p>
+                    <p><strong>Телефон:</strong> {manager_phone}</p>
+                    <p><strong>Email:</strong> {contact}</p>
+                    <p><strong>Username:</strong> {username}</p>
+                    <hr>
+                    <h3>Детали заявки:</h3>
+                    <p><strong>Запрос:</strong> {user_message_text}</p>
+                    <hr>
+                    <p><strong>🔔 КЛИЕНТ ПРОСИТ СВЯЗАТЬСЯ С МЕНЕДЖЕРОМ!</strong></p>
+                </body>
+                </html>
+                """
+                send_email(email_subject, email_body, ADMIN_EMAIL)
+            except Exception as e:
+                logging.exception("Failed to send manager call email: %s", e)
+        else:
+            # Trading house
+            product = data.get('product', 'Не указан')
+            country = data.get('country', 'Не указана')
+            amount = data.get('amount', 'Не указана')
+            currency = data.get('currency', 'Не указана')
+            
+            # Notify admin about manager call
+            if ADMIN_CHAT_ID and ADMIN_CHAT_ID != 0:
+                text = (
+                    f"📞 <b>ПОЗВАТЬ МЕНЕДЖЕРА - {selected_service}</b>\n\n"
+                    f"👤 <b>Обращение:</b> {address}\n"
+                    f"📞 <b>Телефон:</b> {manager_phone}\n"
+                    f"📧 <b>Email:</b> {contact}\n"
+                    f"👤 <b>Username:</b> {username}\n\n"
+                    f"📦 <b>Товар:</b> {product}\n"
+                    f"🌍 <b>Страна:</b> {country}\n"
+                    f"💰 <b>Сумма:</b> {amount} {currency}\n\n"
+                    f"🔔 <b>КЛИЕНТ ПРОСИТ СВЯЗАТЬСЯ С МЕНЕДЖЕРОМ!</b>"
+                )
+                await notify_admin(text)
+            
+            # Send email notification
+            try:
+                email_subject = f"📞 Позвать менеджера - {selected_service}"
+                email_body = f"""
+                <html>
+                <body>
+                    <h2>📞 ПОЗВАТЬ МЕНЕДЖЕРА - {selected_service}</h2>
+                    <p><strong>Обращение:</strong> {address}</p>
+                    <p><strong>Телефон:</strong> {manager_phone}</p>
+                    <p><strong>Email:</strong> {contact}</p>
+                    <p><strong>Username:</strong> {username}</p>
+                    <hr>
+                    <h3>Детали заявки:</h3>
+                    <p><strong>Товар:</strong> {product}</p>
+                    <p><strong>Страна:</strong> {country}</p>
+                    <p><strong>Сумма:</strong> {amount} {currency}</p>
+                    <hr>
+                    <p><strong>🔔 КЛИЕНТ ПРОСИТ СВЯЗАТЬСЯ С МЕНЕДЖЕРОМ!</strong></p>
+                </body>
+                </html>
+                """
+                send_email(email_subject, email_body, ADMIN_EMAIL)
+            except Exception as e:
+                logging.exception("Failed to send manager call email: %s", e)
     
     keyboard = buttons.Markup([
             [buttons.MessageButton("🏠 Главное меню")]
@@ -1625,33 +1829,33 @@ async def process_manager_contact(message):
 # Diagnostic commands
 @bot.on_message(detect_commands=True)
 async def cmd_id(message):
-    text = (message.body.text if message.body else "").strip()
+    text = get_message_text(message)
     if not text.startswith("/id"):
         return False
     chat_info = f"""
 🆔 <b>Chat Information:</b>
 
-📱 <b>Chat ID:</b> <code>{message.recipient.chat_id if message.recipient else None}</code>
-👤 <b>User ID:</b> <code>{message.sender.user_id if message.sender else 'N/A'}</code>
+📱 <b>Chat ID:</b> <code>{get_chat_id(message)}</code>
+👤 <b>User ID:</b> <code>{get_sender_id(message) or 'N/A'}</code>
 📝 <b>Chat Type:</b> {message.recipient.chat_type if message.recipient else 'N/A'}
-👤 <b>Username:</b> @{message.sender.username if message.sender and message.sender.username else 'Не указан'}
+👤 <b>Username:</b> {get_sender_display(message)}
 
 💡 <b>Для настройки админа:</b>
 Скопируйте Chat ID и установите в docker-compose.yml:
-<code>ADMIN_CHAT_ID={message.recipient.chat_id if message.recipient else None}</code>
+<code>ADMIN_MAX_CHAT_ID={get_chat_id(message)}</code>
 """
     await message.send(chat_info, format="html")
 
 @bot.on_message(detect_commands=True)
 async def cmd_ping(message):
-    text = (message.body.text if message.body else "").strip()
+    text = get_message_text(message)
     if not text.startswith("/ping"):
         return False
     await message.send("pong")
 
 @bot.on_message(detect_commands=True)
 async def cmd_test_email(message):
-    text = (message.body.text if message.body else "").strip()
+    text = get_message_text(message)
     if not text.startswith("/test_email"):
         return False
     """Test email sending functionality"""
@@ -1663,12 +1867,12 @@ async def cmd_test_email(message):
         <html>
         <body>
             <h2>🧪 Тест отправки email</h2>
-            <p><strong>Время:</strong> {message.date}</p>
-            <p><strong>Chat ID:</strong> {message.recipient.chat_id if message.recipient else None}</p>
-                <p><strong>Username:</strong> @{message.sender.username if message.sender and message.sender.username else 'Не указан'}</p>
+            <p><strong>Время:</strong> {format_message_timestamp(message)}</p>
+            <p><strong>Chat ID:</strong> {get_chat_id(message)}</p>
+            <p><strong>Username:</strong> {get_sender_display(message)}</p>
             <p><strong>SMTP Host:</strong> {SMTP_HOST}</p>
             <p><strong>SMTP Port:</strong> {SMTP_PORT}</p>
-            <p><strong>From:</strong> {SMTP_USER}</p>
+            <p><strong>From:</strong> {SMTP_FROM}</p>
             <p><strong>To:</strong> {ADMIN_EMAIL}</p>
             <hr>
             <p>Если вы получили это письмо, значит SMTP работает корректно!</p>
@@ -1689,7 +1893,7 @@ async def cmd_test_email(message):
 
 @bot.on_message(detect_commands=True)
 async def cmd_smtp_info(message):
-    text = (message.body.text if message.body else "").strip()
+    text = get_message_text(message)
     if not text.startswith("/smtp_info"):
         return False
     """Show current SMTP configuration"""
@@ -1697,7 +1901,7 @@ async def cmd_smtp_info(message):
 📧 <b>SMTP Configuration:</b>
 
 🏠 <b>Primary Host:</b> {SMTP_HOST}:{SMTP_PORT}
-👤 <b>User:</b> {SMTP_USER}
+👤 <b>User:</b> {SMTP_FROM}
 📬 <b>Admin Email:</b> {ADMIN_EMAIL}
 
 🔄 <b>Fallback Servers:</b>
@@ -1709,7 +1913,7 @@ async def cmd_smtp_info(message):
 
 @bot.on_message(detect_commands=True)
 async def cmd_network_test(message):
-    text = (message.body.text if message.body else "").strip()
+    text = get_message_text(message)
     if not text.startswith("/network_test"):
         return False
     """Test network connectivity to SMTP servers"""
@@ -1735,7 +1939,7 @@ async def cmd_network_test(message):
 
 @bot.on_message(detect_commands=True)
 async def cmd_gmail_test(message):
-    text = (message.body.text if message.body else "").strip()
+    text = get_message_text(message)
     if not text.startswith("/gmail_test"):
         return False
     """Test Gmail SMTP connection specifically"""
@@ -1746,8 +1950,7 @@ async def cmd_gmail_test(message):
         import ssl
         
         # Prepare password (sanitize spaces)
-        raw_app_password = os.getenv("GMAIL_APP_PASSWORD", SMTP_PASSWORD) or ""
-        app_password = raw_app_password.replace(" ", "")
+        app_password = SMTP_PASSWORD
         
         # Test STARTTLS (port 587)
         try:
@@ -1756,7 +1959,8 @@ async def cmd_gmail_test(message):
             context = ssl.create_default_context()
             server.starttls(context=context)
             server.ehlo()
-            server.login(SMTP_USER, app_password)
+            if SMTP_USER and app_password:
+                server.login(SMTP_USER, app_password)
             server.quit()
             await message.send("✅ Gmail STARTTLS (587) - подключение успешно!")
         except Exception as e:
@@ -1766,7 +1970,8 @@ async def cmd_gmail_test(message):
         try:
             context = ssl.create_default_context()
             server = smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15, context=context)
-            server.login(SMTP_USER, app_password)
+            if SMTP_USER and app_password:
+                server.login(SMTP_USER, app_password)
             server.quit()
             await message.send("✅ Gmail SSL (465) - подключение успешно!")
         except Exception as e:
@@ -1777,7 +1982,7 @@ async def cmd_gmail_test(message):
 
 @bot.on_message(detect_commands=True)
 async def cmd_api_test(message):
-    text = (message.body.text if message.body else "").strip()
+    text = get_message_text(message)
     if not text.startswith("/api_test"):
         return False
     """Test HTTP API email service"""
@@ -1797,8 +2002,8 @@ async def cmd_api_test(message):
         test_subject = "🧪 Тест Gmail - KVT Bot"
         test_body = f"""
         <h2>Тестовое письмо через Gmail</h2>
-        <p><strong>Время:</strong> {message.date}</p>
-        <p><strong>Chat ID:</strong> {message.recipient.chat_id if message.recipient else None}</p>
+        <p><strong>Время:</strong> {format_message_timestamp(message)}</p>
+        <p><strong>Chat ID:</strong> {get_chat_id(message)}</p>
         <p><strong>Метод:</strong> Gmail App Password</p>
         <hr>
         <p>✅ Если вы получили это письмо, значит Gmail работает!</p>
@@ -1819,7 +2024,7 @@ async def cmd_api_test(message):
 
 @bot.on_message(detect_commands=True)
 async def cmd_email_test_all(message):
-    text = (message.body.text if message.body else "").strip()
+    text = get_message_text(message)
     if not text.startswith("/email_test_all"):
         return False
     """Test all email methods comprehensively"""
@@ -1829,8 +2034,8 @@ async def cmd_email_test_all(message):
         test_subject = "🧪 Комплексный тест email - KVT Bot"
         test_body = f"""
         <h2>📧 Комплексный тест email</h2>
-        <p><strong>Время:</strong> {message.date}</p>
-        <p><strong>Chat ID:</strong> {message.recipient.chat_id if message.recipient else None}</p>
+        <p><strong>Время:</strong> {format_message_timestamp(message)}</p>
+        <p><strong>Chat ID:</strong> {get_chat_id(message)}</p>
         <p><strong>Тест:</strong> Все методы отправки</p>
         <hr>
         <p>✅ Если вы получили это письмо, значит email работает!</p>
@@ -1853,10 +2058,10 @@ async def cmd_email_test_all(message):
         # Method 2: Resend HTTPS fallback (if key configured)
         try:
             import os, requests
-            resend_key = os.getenv('RESEND_API_KEY')
+            resend_key = settings.resend_api_key
             if resend_key:
                 headers = {"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"}
-                payload = {"from": f"KVT Bot <{SMTP_USER}>", "to": [ADMIN_EMAIL], "subject": f"{test_subject} (Resend)", "html": test_body}
+                payload = {"from": f"KVT Bot <{SMTP_FROM}>", "to": [ADMIN_EMAIL], "subject": f"{test_subject} (Resend)", "html": test_body}
                 resp = requests.post("https://api.resend.com/emails", headers=headers, json=payload, timeout=10)
                 if resp.status_code in (200,201):
                     methods_tested.append("✅ Resend HTTPS: Success")
@@ -1874,13 +2079,13 @@ async def cmd_email_test_all(message):
             from email.mime.multipart import MIMEMultipart
             
             msg = MIMEMultipart()
-            msg['From'] = SMTP_USER
+            msg['From'] = SMTP_FROM
             msg['To'] = ADMIN_EMAIL
             msg['Subject'] = f"{test_subject} (MailHog)"
             msg.attach(MIMEText(test_body, 'html', 'utf-8'))
             
             server = smtplib.SMTP("mailhog", 1025, timeout=5)
-            server.sendmail(SMTP_USER, ADMIN_EMAIL, msg.as_string())
+            server.sendmail(SMTP_FROM, ADMIN_EMAIL, msg.as_string())
             server.quit()
             methods_tested.append("✅ MailHog: Success")
         except Exception as e:
@@ -1906,7 +2111,7 @@ async def cmd_email_test_all(message):
 
 @bot.on_message(detect_commands=True)
 async def cmd_email_status(message):
-    text = (message.body.text if message.body else "").strip()
+    text = get_message_text(message)
     if not text.startswith("/email_status"):
         return False
     """Show email configuration status"""
@@ -1915,7 +2120,7 @@ async def cmd_email_status(message):
 
 🔧 <b>Email Enabled:</b> {'✅ Yes' if EMAIL_ENABLED else '❌ No'}
 🏠 <b>SMTP Host:</b> {SMTP_HOST}:{SMTP_PORT}
-👤 <b>User:</b> {SMTP_USER}
+👤 <b>User:</b> {SMTP_FROM}
 📬 <b>Admin Email:</b> {ADMIN_EMAIL}
 
 💡 <b>Commands:</b>
@@ -1930,7 +2135,7 @@ async def cmd_email_status(message):
 
 @bot.on_message(detect_commands=True)
 async def cmd_test_admin(message):
-    text = (message.body.text if message.body else "").strip()
+    text = get_message_text(message)
     if not text.startswith("/test_admin"):
         return False
     """Test admin notification"""
@@ -1940,9 +2145,9 @@ async def cmd_test_admin(message):
         test_text = f"""
 🧪 <b>Тест уведомления админу</b>
 
-📱 <b>От:</b> @{message.sender.username if message.sender and message.sender.username else 'Не указан'}
-🆔 <b>Chat ID:</b> {message.recipient.chat_id if message.recipient else None}
-⏰ <b>Время:</b> {message.date}
+📱 <b>От:</b> {get_sender_display(message)}
+🆔 <b>Chat ID:</b> {get_chat_id(message)}
+⏰ <b>Время:</b> {format_message_timestamp(message)}
 
 ✅ Если вы получили это сообщение, значит уведомления админу работают!
 """
@@ -1967,14 +2172,14 @@ async def process_edit_field_selection(message):
     if current_state != ApplicationStates.waiting_for_edit_field:
         return False
     """Handle field selection for editing"""
-    field_choice = message.body.text if message.body else "".strip()
+    field_choice = get_message_text(message)
     
     if field_choice == "⬅️ Назад":
         # Return to previous state based on current service
         data = state.get_data() or {}
-        service = data.get('service', '')
+        service = data.get('selected_service', '')
         
-        if service == "Торговый дом":
+        if is_trading_house_service(service):
             # Return to trading house final step
             product = data.get('product', 'Не указан')
             country = data.get('country', 'Не указана')
@@ -2079,12 +2284,12 @@ async def process_edit_text(message):
     if current_state != ApplicationStates.waiting_for_edit_text:
         return False
     """Handle text input for editing"""
-    if message.body.text if message.body else "" == "❌ Отмена":
+    if get_message_text(message) == "❌ Отмена":
         # Return to field selection
         data = state.get_data() or {}
-        service = data.get('service', '')
+        service = data.get('selected_service', '')
         
-        if service == "Торговый дом":
+        if is_trading_house_service(service):
             keyboard = buttons.Markup([
                     [buttons.MessageButton("📦 Товар")],
                     [buttons.MessageButton("🌍 Страна")],
@@ -2120,7 +2325,7 @@ async def process_edit_text(message):
     # Get the field being edited
     data = state.get_data() or {}
     editing_field = data.get('editing_field')
-    new_value = message.body.text if message.body else "".strip()
+    new_value = get_message_text(message)
     
     if not editing_field:
         await message.send("❌ Ошибка: поле для редактирования не найдено.")
@@ -2132,9 +2337,9 @@ async def process_edit_text(message):
     state.change_data(data)
     
     # Show updated summary and return to final step
-    service = data.get('service', '')
+    service = data.get('selected_service', '')
     
-    if service == "Торговый дом":
+    if is_trading_house_service(service):
         # Show updated trading house summary
         product = data.get('product', 'Не указан')
         country = data.get('country', 'Не указана')
@@ -2211,12 +2416,39 @@ async def main():
     logging.info(f"   🤖 Bot Token: {BOT_TOKEN[:10]}..." if BOT_TOKEN else "   ❌ Bot Token: NOT SET")
     logging.info(f"   👤 Admin Chat ID: {ADMIN_CHAT_ID}")
     logging.info(f"   📧 Email Enabled: {EMAIL_ENABLED}")
-    logging.info(f"   📤 SMTP User: {SMTP_USER}")
+    logging.info(f"   📤 SMTP User: {SMTP_USER or 'not set'}")
+    logging.info(f"   🪪 SMTP From: {SMTP_FROM}")
     logging.info(f"   📥 Admin Email: {ADMIN_EMAIL}")
     logging.info(f"   🌐 SMTP Host: {SMTP_HOST}:{SMTP_PORT}")
+
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN is not configured")
+
+    original_handle_update = bot.handle_update
+
+    async def traced_handle_update(update: dict):
+        update_type = update.get("update_type")
+        if update_type == "message_created":
+            message = update.get("message", {})
+            body = message.get("body", {})
+            recipient = message.get("recipient", {})
+            sender = message.get("sender", {})
+            logging.info(
+                "📩 update=message_created chat_id=%s user_id=%s text=%r",
+                recipient.get("chat_id"),
+                sender.get("user_id"),
+                body.get("text"),
+            )
+        elif update_type == "bot_started":
+            logging.info("📩 update=bot_started payload=%s", update)
+        else:
+            logging.info("📩 update=%s", update_type)
+        return await original_handle_update(update)
+
+    bot.handle_update = traced_handle_update
     
     # Test email configuration
-    if EMAIL_ENABLED:
+    if EMAIL_ENABLED and STARTUP_EMAIL_TEST and ADMIN_EMAIL:
         logging.info("📧 Testing email configuration...")
         test_result = send_email(
             "🧪 Bot Startup Test",
@@ -2233,7 +2465,13 @@ async def main():
     
     # Start Max bot polling
     try:
-        await bot.start_polling()
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        session = aiohttp.ClientSession(
+            headers={"Authorization": bot.access_token},
+            connector=connector,
+        )
+        await bot.start_polling(session=session)
     except Exception as e:
         logging.error("💥 Bot polling failed!")
         logging.error(f"   🚨 Error: {e}")

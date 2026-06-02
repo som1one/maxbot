@@ -1,106 +1,106 @@
-# Развертывание KVT Bot
+# Deployment Guide
 
-## Подготовка к развертыванию
+## 1. Подготовка сервера
 
-### 1. Настройка Docker Hub
-
-1. Зарегистрируйтесь на [Docker Hub](https://hub.docker.com/)
-2. Создайте репозиторий `kvt-bot`
-3. В файле `deploy.sh` замените `your-dockerhub-username` на ваш username
-
-### 2. Сборка и загрузка образа
+Подойдёт Ubuntu 22.04+ или Debian 12+.
 
 ```bash
-# Сделайте скрипт исполняемым
-chmod +x deploy.sh
-
-# Запустите сборку и загрузку
-./deploy.sh
+sudo apt update
+sudo apt install -y docker.io docker-compose-plugin git
+sudo systemctl enable --now docker
 ```
 
-### 3. Настройка переменных окружения
+Проверьте:
 
-Создайте файл `.env` на сервере:
+```bash
+docker --version
+docker compose version
+```
+
+## 2. Клонирование проекта
+
+```bash
+git clone <your-repo-url> maxbot
+cd maxbot
+```
+
+## 3. Создание production-конфига
+
+```bash
+cp .env.example .env
+```
+
+Заполните минимум:
 
 ```env
-# Telegram Bot
-BOT_TOKEN=your_bot_token_here
-ADMIN_CHAT_ID=your_admin_chat_id_here
+ENV=production
+TZ=Europe/Minsk
 
-# Email (уже настроены)
+BOT_TOKEN=replace-with-real-token
+ADMIN_MAX_CHAT_ID=replace-with-admin-chat-id
+
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=strong-random-password
+
+POSTGRES_HOST=db
+POSTGRES_PORT=5432
+POSTGRES_DB=kvtservice
+POSTGRES_USER=kvt
+POSTGRES_PASSWORD=strong-random-db-password
+
 SMTP_HOST=smtp.gmail.com
-SMTP_PORT=465
-SMTP_USER=sbcargobot@gmail.com
-SMTP_PASSWORD=1Qqazxsw55
-DEFAULT_NOTIFICATION_EMAIL=sb@sbcargo.ru
+SMTP_PORT=587
+SMTP_USER=your-smtp-login@example.com
+SMTP_PASSWORD=your-smtp-password
+SMTP_FROM=your-smtp-login@example.com
+DEFAULT_NOTIFICATION_EMAIL=ops@example.com
+EMAIL_ENABLED=true
+STARTUP_EMAIL_TEST=false
 ```
 
-## Развертывание на сервере
-
-### 1. Установка Docker и Docker Compose
+## 4. Запуск
 
 ```bash
-# Ubuntu/Debian
-sudo apt update
-sudo apt install docker.io docker-compose-plugin
-
-# CentOS/RHEL
-sudo yum install docker docker-compose-plugin
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
-### 2. Запуск приложения
+## 5. Проверка
 
 ```bash
-# Клонируйте репозиторий (или скопируйте файлы)
-git clone <your-repo-url>
-cd PythonProject
-
-# Запустите приложение
-docker-compose -f docker-compose.prod.yml up -d
+docker compose ps
+docker compose logs -f bot
+docker compose logs -f backend
+curl http://127.0.0.1:8000/health
 ```
 
-### 3. Проверка работы
+Ожидаемо:
+
+- `db` в статусе `healthy`
+- `backend` отвечает `{"status":"ok",...}`
+- `bot` не падает и уходит в polling
+
+## 6. Обновление
 
 ```bash
-# Проверьте статус контейнеров
-docker-compose -f docker-compose.prod.yml ps
-
-# Посмотрите логи бота
-docker-compose -f docker-compose.prod.yml logs -f bot
+git pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
-## Обновление
+## 7. Резервная копия БД
 
 ```bash
-# Остановите приложение
-docker-compose -f docker-compose.prod.yml down
-
-# Обновите образ
-docker-compose -f docker-compose.prod.yml pull
-
-# Запустите заново
-docker-compose -f docker-compose.prod.yml up -d
+docker compose exec -T db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > backup.sql
 ```
 
-## Мониторинг
+Восстановление:
 
 ```bash
-# Логи бота
-docker-compose -f docker-compose.prod.yml logs -f bot
-
-# Логи базы данных
-docker-compose -f docker-compose.prod.yml logs -f postgres
-
-# Статистика ресурсов
-docker stats
+docker compose exec -T db psql -U "$POSTGRES_USER" "$POSTGRES_DB" < backup.sql
 ```
 
-## Резервное копирование
+## 8. Что проверить перед боем
 
-```bash
-# Создание бэкапа базы данных
-docker-compose -f docker-compose.prod.yml exec postgres pg_dump -U kvt kvtservice > backup.sql
-
-# Восстановление из бэкапа
-docker-compose -f docker-compose.prod.yml exec -T postgres psql -U kvt kvtservice < backup.sql
-```
+- В git нет `.env`
+- `BOT_TOKEN` и SMTP-пароли не старые, а перевыпущенные
+- Запущен ровно один инстанс `bot`
+- Новая заявка доходит и в Max/админ-чат, и на email

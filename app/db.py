@@ -1,16 +1,19 @@
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
-# Hardcoded DB URL for Docker environment
-DB_URL = "postgresql+psycopg2://kvt:kvtpassword@db:5432/kvtservice"
+from .config import settings
 
-engine = create_engine(
-    DB_URL,
-    pool_pre_ping=True,
-    connect_args={"options": "-c timezone=utc"},
-    echo=False,
-)
 
+engine_kwargs = {
+    "pool_pre_ping": True,
+    "echo": False,
+}
+
+if settings.sqlalchemy_database_url.startswith("postgresql"):
+    engine_kwargs["connect_args"] = {"options": "-c timezone=utc"}
+
+
+engine = create_engine(settings.sqlalchemy_database_url, **engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 

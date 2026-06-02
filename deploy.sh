@@ -1,30 +1,25 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Скрипт для сборки и загрузки образа в Docker Hub
+set -euo pipefail
 
-# Настройки
-DOCKER_USERNAME="greenteeea"  # Замените на ваш Docker Hub username
-IMAGE_NAME="kvt-bot"
-TAG="latest"
+IMAGE_NAME="${IMAGE_NAME:-maxbot}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+FULL_IMAGE_NAME="${FULL_IMAGE_NAME:-$IMAGE_NAME:$IMAGE_TAG}"
 
-echo "🔨 Сборка Docker образа..."
-docker build -t $DOCKER_USERNAME/$IMAGE_NAME:$TAG .
+echo "Building image ${FULL_IMAGE_NAME}..."
+docker build -t "${FULL_IMAGE_NAME}" .
 
-if [ $? -eq 0 ]; then
-    echo "✅ Образ успешно собран!"
-    
-    echo "📤 Загрузка образа в Docker Hub..."
-    docker push $DOCKER_USERNAME/$IMAGE_NAME:$TAG
-    
-    if [ $? -eq 0 ]; then
-        echo "✅ Образ успешно загружен в Docker Hub!"
-        echo "🐳 Для запуска на сервере используйте:"
-        echo "   docker-compose -f docker-compose.prod.yml up -d"
-    else
-        echo "❌ Ошибка при загрузке образа в Docker Hub"
-        exit 1
-    fi
-else
-    echo "❌ Ошибка при сборке образа"
+echo "Image built successfully."
+echo "Run locally with:"
+echo "  docker compose up -d --build"
+
+if [[ "${PUSH_IMAGE:-false}" == "true" ]]; then
+  if [[ -z "${REGISTRY_IMAGE:-}" ]]; then
+    echo "REGISTRY_IMAGE is required when PUSH_IMAGE=true"
     exit 1
+  fi
+
+  docker tag "${FULL_IMAGE_NAME}" "${REGISTRY_IMAGE}"
+  docker push "${REGISTRY_IMAGE}"
+  echo "Pushed ${REGISTRY_IMAGE}"
 fi

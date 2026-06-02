@@ -1,51 +1,60 @@
 services:
-  bot:
-    image: greenteeea/kvt-bot:latest
-    container_name: kvt-bot
-    command: ["python", "main.py", "bot"]
+  backend:
+    build:
+      context: .
+    container_name: maxbot-backend
+    command: ["sh", "-c", "alembic upgrade head && python main.py backend"]
+    network_mode: host
+    env_file:
+      - .env
     environment:
-      - TZ=UTC
-      - BOT_TOKEN=8219745332:AAGe44Gse9QMerKk7znlo8xMXoBVMndlLtk
-      - ADMIN_TELEGRAM_CHAT_ID=7558604816
-      - SMTP_HOST=smtp.gmail.com
-      - SMTP_PORT=587
-      - SMTP_USER=sbcargobot@gmail.com
-      - SMTP_PASSWORD=uova hutt outv dzue
-      - GMAIL_APP_PASSWORD=uova hutt outv dzue
-      - DEFAULT_NOTIFICATION_EMAIL=sb@sbcargo.ru
-      - EMAIL_ENABLED=true
+      TZ: ${TZ:-UTC}
     depends_on:
       db:
-        condition: service_started
-      mailhog:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+
+  bot:
+    build:
+      context: .
+    container_name: maxbot-bot
+    command: ["python", "main.py", "bot"]
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-UTC}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: public.ecr.aws/docker/library/postgres:15
+    container_name: maxbot-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-kvtservice}
+      POSTGRES_USER: ${POSTGRES_USER:-kvt}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 
   mailhog:
     image: mailhog/mailhog:latest
-    container_name: kvt-mailhog
+    container_name: maxbot-mailhog
+    profiles: ["dev"]
     ports:
-      - "1025:1025"  # SMTP
-      - "8025:8025"  # Web UI
-    restart: unless-stopped
-
-
-  db:
-    image: postgres:15
-    container_name: kvt-postgres
-    environment:
-      - POSTGRES_DB=kvtservice
-      - POSTGRES_USER=kvt
-      - POSTGRES_PASSWORD=kvtpassword
-    ports:
-      - "5433:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
+      - "1025:1025"
+      - "8025:8025"
     restart: unless-stopped
 
 
