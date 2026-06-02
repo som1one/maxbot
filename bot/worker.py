@@ -1194,26 +1194,37 @@ async def process_trading_house_final(message):
         return
     
     elif final_choice == "📞 Позвать менеджера":
-        # Ask for phone number before calling manager
-        keyboard = buttons.Markup([
+        data = state.get_data() or {}
+        selected_service = "Торговый дом (закупка товаров)"
+        
+        # Max Chat URL generation with context
+        max_chat_url = settings.max_chat_url or "https://example.com/max-chat"
+        context_text = f"Заявка из бота.\nУслуга: {selected_service}"
+        encoded_text = urllib.parse.quote(context_text)
+        chat_url_with_context = f"{max_chat_url}?text={encoded_text}"
+        
+        keyboard = buttons.InlineMarkup([
+            [buttons.InlineButton("Перейти в чат", url=chat_url_with_context)]
         ])
         
-        data = state.get_data() or {}
-        product = data.get('product', 'Не указан')
-        country = data.get('country', 'Не указана')
-        amount = data.get('amount', 'Не указана')
-        currency = data.get('currency', 'Не указана')
-        
         await message.send(
-            f"📞 <b>Позвать менеджера</b>\n\n"
-            f"📦 <b>Товар:</b> {product}\n"
-            f"🌍 <b>Страна:</b> {country}\n"
-            f"💰 <b>Сумма:</b> {amount} {currency}\n\n"
-            f"📞 <b>Введите ваш номер телефона для связи с менеджером:</b>",
+            f"📞 <b>Связь с менеджером</b>\n\n"
+            f"Пожалуйста, нажмите на кнопку ниже, чтобы перейти в чат с нашим менеджером. "
+            f"Мы уже передали ему контекст вашей заявки!",
             keyboard=keyboard,
             format="html"
         )
-        state.change_state(ApplicationStates.waiting_for_manager_phone)
+        
+        admin_text = (
+            f"📞 <b>Запрос связи с менеджером (Макс чат)</b>\n\n"
+            f"Услуга: {selected_service}\n"
+            f"Имя: {data.get('address', 'Не указано')}\n"
+            f"Username: {get_sender_display(message)}"
+        )
+        import asyncio
+        asyncio.create_task(notify_admin(admin_text))
+        
+        state.clear()
     
     elif final_choice == "⬅️ Назад":
         # Go back to currency selection
@@ -1580,33 +1591,37 @@ async def process_customs_final(message):
         return
     
     elif final_choice == "📞 Позвать менеджера":
-        # Ask for phone number before calling manager
-        keyboard = buttons.Markup([
+        data = state.get_data() or {}
+        selected_service = "Таможенное оформление"
+        
+        # Max Chat URL generation with context
+        max_chat_url = settings.max_chat_url or "https://example.com/max-chat"
+        context_text = f"Заявка из бота.\nУслуга: {selected_service}"
+        encoded_text = urllib.parse.quote(context_text)
+        chat_url_with_context = f"{max_chat_url}?text={encoded_text}"
+        
+        keyboard = buttons.InlineMarkup([
+            [buttons.InlineButton("Перейти в чат", url=chat_url_with_context)]
         ])
         
-        data = state.get_data() or {}
-        product_name = data.get('product_name', 'Не указан')
-        logistics_interest = data.get('logistics_interest', 'Не указано')
-        cargo_weight = data.get('cargo_weight', 'Не указан')
-        pickup = data.get('pickup_location', 'Не указано')
-        delivery = data.get('delivery_location', 'Не указано')
-        customs_location = data.get('customs_location', 'Не указано')
-        special_conditions = data.get('special_conditions', 'Не указано')
-        
         await message.send(
-            f"📞 <b>Позвать менеджера</b>\n\n"
-            f"📦 <b>Товар:</b> {product_name}\n"
-            f"🚛 <b>Логистика:</b> {logistics_interest}\n"
-            f"⚖️ <b>Вес:</b> {cargo_weight}\n"
-            f"📍 <b>Забрать из:</b> {pickup}\n"
-            f"🎯 <b>Доставить в:</b> {delivery}\n"
-            f"🏛️ <b>Таможня:</b> {customs_location}\n"
-            f"⚠️ <b>Условия:</b> {special_conditions}\n\n"
-            f"📞 <b>Введите ваш номер телефона для связи с менеджером:</b>",
+            f"📞 <b>Связь с менеджером</b>\n\n"
+            f"Пожалуйста, нажмите на кнопку ниже, чтобы перейти в чат с нашим менеджером. "
+            f"Мы уже передали ему контекст вашей заявки!",
             keyboard=keyboard,
             format="html"
         )
-        state.change_state(ApplicationStates.waiting_for_manager_phone)
+        
+        admin_text = (
+            f"📞 <b>Запрос связи с менеджером (Макс чат)</b>\n\n"
+            f"Услуга: {selected_service}\n"
+            f"Имя: {data.get('address', 'Не указано')}\n"
+            f"Username: {get_sender_display(message)}"
+        )
+        import asyncio
+        asyncio.create_task(notify_admin(admin_text))
+        
+        state.clear()
 
 
 # Manager transfer handlers
