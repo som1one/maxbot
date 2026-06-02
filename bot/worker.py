@@ -596,7 +596,7 @@ async def process_phone_submission(message):
     
     await message.send(
         f"✅ <b>Телефон:</b> {phone}\n\n"
-        f"📧 <b>Введите ваш email адрес (с пометкой «рабочий»):</b>",
+        f"📧 <b>Введите ваш email адрес (рабочий):</b>",
         keyboard=keyboard,
         format="html"
     )
