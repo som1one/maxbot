@@ -312,13 +312,12 @@ def build_manager_context_text(data: dict, selected_service: str) -> str:
 
 
 async def handle_call_manager_action(message, state, service_name=None):
-    """Показать данные заявки для копирования и ссылку на чат менеджера."""
+    """Показать инструкцию отдельно и вынести данные заявки в отдельное сообщение."""
     data = state.get_data() or {}
     selected_service = service_name or data.get("selected_service", "Не указана")
 
     max_chat_url = settings.max_chat_url or "https://example.com/max-chat"
     context_text = build_manager_context_text(data, selected_service)
-    copy_text = html.escape(context_text or "Данные заявки пока не заполнены.")
 
     keyboard = buttons.Markup([
         [buttons.LinkButton("💬 Перейти в чат", url=max_chat_url)],
@@ -326,10 +325,16 @@ async def handle_call_manager_action(message, state, service_name=None):
 
     await message.send(
         f"📞 <b>Связь с менеджером</b>\n\n"
-        f"Нажмите и удерживайте сообщение ниже, выберите «Копировать» "
-        f"и отправьте данные менеджеру в чат:\n\n"
-        f"<code>{copy_text}</code>",
+        f"Ниже отдельным сообщением будут данные заявки. "
+        f"Нажмите и удерживайте именно это сообщение, выберите «Копировать» "
+        f"и отправьте менеджеру в чат.",
         keyboard=keyboard,
+        format="html"
+    )
+
+    await message.send(
+        "Данные заявки для менеджера:\n\n"
+        f"{html.escape(context_text or 'Данные заявки пока не заполнены.')}",
         format="html"
     )
     
