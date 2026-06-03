@@ -270,62 +270,66 @@ def get_message_text(message) -> str:
     return message.body.text.strip()
 
 
-async def handle_call_manager_action(message, state, service_name=None):
-    """Helper to generate dynamic link with chat context and notify admin."""
-    data = state.get_data() or {}
-    selected_service = service_name or data.get('selected_service', 'Не указана')
-    
-    max_chat_url = settings.max_chat_url or "https://example.com/max-chat"
-    context_parts = ["Заявка из бота:"]
-    if selected_service and selected_service != 'Не указана':
+def build_manager_context_text(data: dict, selected_service: str) -> str:
+    """Собрать понятный текст заявки для черновика сообщения менеджеру."""
+    context_parts = ["Здравствуйте! Передаю контекст заявки:"]
+    if selected_service and selected_service != "Не указана":
         context_parts.append(f"Услуга: {selected_service}")
-    if data.get('address'):
+    if data.get("address"):
         context_parts.append(f"Обращение: {data.get('address')}")
-    if data.get('phone'):
+    if data.get("company"):
+        context_parts.append(f"Компания: {data.get('company')}")
+    if data.get("inn"):
+        context_parts.append(f"ИНН: {data.get('inn')}")
+    if data.get("phone"):
         context_parts.append(f"Телефон: {data.get('phone')}")
-    if data.get('email'):
+    if data.get("email"):
         context_parts.append(f"Email: {data.get('email')}")
-    if data.get('user_message'):
+    if data.get("user_message"):
         context_parts.append(f"Сообщение: {data.get('user_message')}")
-    if data.get('product'):
+    if data.get("product"):
         context_parts.append(f"Товар: {data.get('product')}")
-    if data.get('country'):
+    if data.get("country"):
         context_parts.append(f"Страна: {data.get('country')}")
-    if data.get('amount'):
-        curr = data.get('currency', '')
+    if data.get("amount"):
+        curr = data.get("currency", "")
         context_parts.append(f"Сумма: {data.get('amount')} {curr}".strip())
-    if data.get('product_name'):
-        context_parts.append(f"Товар: {data.get('product_name')}")
-    if data.get('logistics_interest'):
+    if data.get("product_name"):
+        context_parts.append(f"Название товара: {data.get('product_name')}")
+    if data.get("logistics_interest"):
         context_parts.append(f"Логистика: {data.get('logistics_interest')}")
-    if data.get('cargo_weight'):
+    if data.get("cargo_weight"):
         context_parts.append(f"Вес: {data.get('cargo_weight')}")
-    if data.get('pickup_location'):
+    if data.get("pickup_location"):
         context_parts.append(f"Откуда: {data.get('pickup_location')}")
-    if data.get('delivery_location'):
+    if data.get("delivery_location"):
         context_parts.append(f"Куда: {data.get('delivery_location')}")
-    if data.get('customs_location'):
+    if data.get("customs_location"):
         context_parts.append(f"Таможня: {data.get('customs_location')}")
-    if data.get('special_conditions'):
+    if data.get("special_conditions"):
         context_parts.append(f"Условия: {data.get('special_conditions')}")
-        
-    context_text = "\n".join(context_parts)
-    
-    # Safely append query parameters
-    query_string = urllib.parse.urlencode({'text': context_text})
-    if "?" in max_chat_url:
-        chat_url_with_context = f"{max_chat_url}&{query_string}"
-    else:
-        chat_url_with_context = f"{max_chat_url}?{query_string}"
-        
+    return "\n".join(context_parts)
+
+
+async def handle_call_manager_action(message, state, service_name=None):
+    """Подготовить рабочие ссылки для перехода к менеджеру."""
+    data = state.get_data() or {}
+    selected_service = service_name or data.get("selected_service", "Не указана")
+
+    max_chat_url = settings.max_chat_url or "https://example.com/max-chat"
+    context_text = build_manager_context_text(data, selected_service)
+    share_url = f"https://max.ru/:share?text={urllib.parse.quote(context_text, safe='')}"
+
     keyboard = buttons.Markup([
-        [buttons.LinkButton("Перейти в чат", url=chat_url_with_context)]
+        [buttons.LinkButton("📝 Открыть черновик", url=share_url)],
+        [buttons.LinkButton("💬 Перейти в чат", url=max_chat_url)],
     ])
-    
+
     await message.send(
         f"📞 <b>Связь с менеджером</b>\n\n"
-        f"Пожалуйста, нажмите на кнопку ниже, чтобы перейти в чат с нашим менеджером. "
-        f"Мы уже передали ему контекст вашей заявки!",
+        f"Прямой переход в чат не подставляет контекст автоматически. "
+        f"Поэтому мы подготовили черновик вашего сообщения отдельно: "
+        f"сначала можно открыть его, а затем при необходимости перейти в чат менеджера.",
         keyboard=keyboard,
         format="html"
     )
@@ -827,27 +831,6 @@ async def process_email(message):
         
     elif text == "📞 Позвать менеджера":
         await handle_call_manager_action(message, state)
-        return True
-        
-        await message.send(
-            f"📞 <b>Связь с менеджером (обновлено)</b>\n\n"
-            f"Пожалуйста, нажмите на кнопку ниже, чтобы перейти в чат с нашим менеджером. "
-            f"Мы уже передали ему контекст вашей заявки!",
-            keyboard=keyboard,
-            format="html"
-        )
-        
-        # Send admin notification so they also know
-        admin_text = (
-            f"📞 <b>Запрос связи с менеджером (Макс чат)</b>\n\n"
-            f"Услуга: {selected_service}\n"
-            f"Имя: {data.get('address', 'Не указано')}\n"
-            f"Username: {get_sender_display(message)}"
-        )
-        import asyncio
-        asyncio.create_task(notify_admin(admin_text))
-        
-        state.clear()
         return True
     
     # If not "Отправить заявку" or "Позвать менеджера", treat as email input
