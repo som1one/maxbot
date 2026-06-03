@@ -1,3 +1,4 @@
+import html
 import logging
 import os
 import smtplib
@@ -10,7 +11,6 @@ import certifi
 from aiomax import Bot, buttons
 from aiomax.fsm import FSMCursor
 from app.config import settings
-import urllib.parse
 from .bitrix import send_to_bitrix24
 
 # Use certifi CA bundle by default so Max API TLS verification works
@@ -271,8 +271,8 @@ def get_message_text(message) -> str:
 
 
 def build_manager_context_text(data: dict, selected_service: str) -> str:
-    """Собрать понятный текст заявки для черновика сообщения менеджеру."""
-    context_parts = ["Здравствуйте! Передаю контекст заявки:"]
+    """Собрать понятный текст заявки для копирования менеджеру."""
+    context_parts = []
     if selected_service and selected_service != "Не указана":
         context_parts.append(f"Услуга: {selected_service}")
     if data.get("address"):
@@ -312,24 +312,22 @@ def build_manager_context_text(data: dict, selected_service: str) -> str:
 
 
 async def handle_call_manager_action(message, state, service_name=None):
-    """Подготовить рабочие ссылки для перехода к менеджеру."""
+    """Показать данные заявки для копирования и ссылку на чат менеджера."""
     data = state.get_data() or {}
     selected_service = service_name or data.get("selected_service", "Не указана")
 
     max_chat_url = settings.max_chat_url or "https://example.com/max-chat"
     context_text = build_manager_context_text(data, selected_service)
-    share_url = f"https://max.ru/:share?text={urllib.parse.quote(context_text, safe='')}"
+    copy_text = html.escape(context_text or "Данные заявки пока не заполнены.")
 
     keyboard = buttons.Markup([
-        [buttons.LinkButton("📝 Открыть черновик", url=share_url)],
         [buttons.LinkButton("💬 Перейти в чат", url=max_chat_url)],
     ])
 
     await message.send(
         f"📞 <b>Связь с менеджером</b>\n\n"
-        f"Прямой переход в чат не подставляет контекст автоматически. "
-        f"Поэтому мы подготовили черновик вашего сообщения отдельно: "
-        f"сначала можно открыть его, а затем при необходимости перейти в чат менеджера.",
+        f"Скопируйте данные заявки и отправьте менеджеру в чат:\n\n"
+        f"<code>{copy_text}</code>",
         keyboard=keyboard,
         format="html"
     )
