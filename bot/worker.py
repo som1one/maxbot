@@ -326,7 +326,8 @@ async def handle_call_manager_action(message, state, service_name=None):
 
     await message.send(
         f"📞 <b>Связь с менеджером</b>\n\n"
-        f"Скопируйте данные заявки и отправьте менеджеру в чат:\n\n"
+        f"Нажмите и удерживайте сообщение ниже, выберите «Копировать» "
+        f"и отправьте данные менеджеру в чат:\n\n"
         f"<code>{copy_text}</code>",
         keyboard=keyboard,
         format="html"
