@@ -270,6 +270,78 @@ def get_message_text(message) -> str:
     return message.body.text.strip()
 
 
+async def handle_call_manager_action(message, state, service_name=None):
+    """Helper to generate dynamic link with chat context and notify admin."""
+    data = state.get_data() or {}
+    selected_service = service_name or data.get('selected_service', 'Не указана')
+    
+    max_chat_url = settings.max_chat_url or "https://example.com/max-chat"
+    context_parts = ["Заявка из бота:"]
+    if selected_service and selected_service != 'Не указана':
+        context_parts.append(f"Услуга: {selected_service}")
+    if data.get('address'):
+        context_parts.append(f"Обращение: {data.get('address')}")
+    if data.get('phone'):
+        context_parts.append(f"Телефон: {data.get('phone')}")
+    if data.get('email'):
+        context_parts.append(f"Email: {data.get('email')}")
+    if data.get('user_message'):
+        context_parts.append(f"Сообщение: {data.get('user_message')}")
+    if data.get('product'):
+        context_parts.append(f"Товар: {data.get('product')}")
+    if data.get('country'):
+        context_parts.append(f"Страна: {data.get('country')}")
+    if data.get('amount'):
+        curr = data.get('currency', '')
+        context_parts.append(f"Сумма: {data.get('amount')} {curr}".strip())
+    if data.get('product_name'):
+        context_parts.append(f"Товар: {data.get('product_name')}")
+    if data.get('logistics_interest'):
+        context_parts.append(f"Логистика: {data.get('logistics_interest')}")
+    if data.get('cargo_weight'):
+        context_parts.append(f"Вес: {data.get('cargo_weight')}")
+    if data.get('pickup_location'):
+        context_parts.append(f"Откуда: {data.get('pickup_location')}")
+    if data.get('delivery_location'):
+        context_parts.append(f"Куда: {data.get('delivery_location')}")
+    if data.get('customs_location'):
+        context_parts.append(f"Таможня: {data.get('customs_location')}")
+    if data.get('special_conditions'):
+        context_parts.append(f"Условия: {data.get('special_conditions')}")
+        
+    context_text = "\n".join(context_parts)
+    
+    # Safely append query parameters
+    query_string = urllib.parse.urlencode({'text': context_text})
+    if "?" in max_chat_url:
+        chat_url_with_context = f"{max_chat_url}&{query_string}"
+    else:
+        chat_url_with_context = f"{max_chat_url}?{query_string}"
+        
+    keyboard = buttons.Markup([
+        [buttons.LinkButton("Перейти в чат", url=chat_url_with_context)]
+    ])
+    
+    await message.send(
+        f"📞 <b>Связь с менеджером</b>\n\n"
+        f"Пожалуйста, нажмите на кнопку ниже, чтобы перейти в чат с нашим менеджером. "
+        f"Мы уже передали ему контекст вашей заявки!",
+        keyboard=keyboard,
+        format="html"
+    )
+    
+    admin_text = (
+        f"📞 <b>Запрос связи с менеджером (Макс чат)</b>\n\n"
+        f"Услуга: {selected_service}\n"
+        f"Имя: {data.get('address', 'Не указано')}\n"
+        f"Username: {get_sender_display(message)}"
+    )
+    import asyncio
+    asyncio.create_task(notify_admin(admin_text))
+    
+    state.clear()
+
+
 def get_sender_display(message) -> str:
     """Вернуть username с @ или человекочитаемый fallback."""
     sender = getattr(message, "sender", None)
@@ -754,50 +826,8 @@ async def process_email(message):
         return True
         
     elif text == "📞 Позвать менеджера":
-        data = state.get_data() or {}
-        selected_service = data.get('selected_service', 'Не указана')
-        
-        # Max Chat URL generation with context
-        max_chat_url = settings.max_chat_url or "https://example.com/max-chat"
-        context_parts = ["Заявка из бота:"]
-        if selected_service and selected_service != 'Не указана':
-            context_parts.append(f"Услуга: {selected_service}")
-        if data.get('address'):
-            context_parts.append(f"Обращение: {data.get('address')}")
-        if data.get('phone'):
-            context_parts.append(f"Телефон: {data.get('phone')}")
-        if data.get('email'):
-            context_parts.append(f"Email: {data.get('email')}")
-        if data.get('user_message'):
-            context_parts.append(f"Сообщение: {data.get('user_message')}")
-        if data.get('product'):
-            context_parts.append(f"Товар: {data.get('product')}")
-        if data.get('country'):
-            context_parts.append(f"Страна: {data.get('country')}")
-        if data.get('amount'):
-            curr = data.get('currency', '')
-            context_parts.append(f"Сумма: {data.get('amount')} {curr}".strip())
-        if data.get('product_name'):
-            context_parts.append(f"Товар: {data.get('product_name')}")
-        if data.get('logistics_interest'):
-            context_parts.append(f"Логистика: {data.get('logistics_interest')}")
-        if data.get('cargo_weight'):
-            context_parts.append(f"Вес: {data.get('cargo_weight')}")
-        if data.get('pickup_location'):
-            context_parts.append(f"Откуда: {data.get('pickup_location')}")
-        if data.get('delivery_location'):
-            context_parts.append(f"Куда: {data.get('delivery_location')}")
-        if data.get('customs_location'):
-            context_parts.append(f"Таможня: {data.get('customs_location')}")
-        if data.get('special_conditions'):
-            context_parts.append(f"Условия: {data.get('special_conditions')}")
-        context_text = "\n".join(context_parts)
-        encoded_text = urllib.parse.quote(context_text)
-        chat_url_with_context = f"{max_chat_url}?text={encoded_text}"
-        
-        keyboard = buttons.Markup([
-            [buttons.LinkButton("Перейти в чат", url=chat_url_with_context)]
-        ])
+        await handle_call_manager_action(message, state)
+        return True
         
         await message.send(
             f"📞 <b>Связь с менеджером (обновлено)</b>\n\n"
@@ -1226,69 +1256,8 @@ async def process_trading_house_final(message):
         return
     
     elif final_choice == "📞 Позвать менеджера":
-        data = state.get_data() or {}
-        selected_service = "Торговый дом (закупка товаров)"
-        
-        # Max Chat URL generation with context
-        max_chat_url = settings.max_chat_url or "https://example.com/max-chat"
-        context_parts = ["Заявка из бота:"]
-        if selected_service and selected_service != 'Не указана':
-            context_parts.append(f"Услуга: {selected_service}")
-        if data.get('address'):
-            context_parts.append(f"Обращение: {data.get('address')}")
-        if data.get('phone'):
-            context_parts.append(f"Телефон: {data.get('phone')}")
-        if data.get('email'):
-            context_parts.append(f"Email: {data.get('email')}")
-        if data.get('user_message'):
-            context_parts.append(f"Сообщение: {data.get('user_message')}")
-        if data.get('product'):
-            context_parts.append(f"Товар: {data.get('product')}")
-        if data.get('country'):
-            context_parts.append(f"Страна: {data.get('country')}")
-        if data.get('amount'):
-            curr = data.get('currency', '')
-            context_parts.append(f"Сумма: {data.get('amount')} {curr}".strip())
-        if data.get('product_name'):
-            context_parts.append(f"Товар: {data.get('product_name')}")
-        if data.get('logistics_interest'):
-            context_parts.append(f"Логистика: {data.get('logistics_interest')}")
-        if data.get('cargo_weight'):
-            context_parts.append(f"Вес: {data.get('cargo_weight')}")
-        if data.get('pickup_location'):
-            context_parts.append(f"Откуда: {data.get('pickup_location')}")
-        if data.get('delivery_location'):
-            context_parts.append(f"Куда: {data.get('delivery_location')}")
-        if data.get('customs_location'):
-            context_parts.append(f"Таможня: {data.get('customs_location')}")
-        if data.get('special_conditions'):
-            context_parts.append(f"Условия: {data.get('special_conditions')}")
-        context_text = "\n".join(context_parts)
-        encoded_text = urllib.parse.quote(context_text)
-        chat_url_with_context = f"{max_chat_url}?text={encoded_text}"
-        
-        keyboard = buttons.Markup([
-            [buttons.LinkButton("Перейти в чат", url=chat_url_with_context)]
-        ])
-        
-        await message.send(
-            f"📞 <b>Связь с менеджером (обновлено)</b>\n\n"
-            f"Пожалуйста, нажмите на кнопку ниже, чтобы перейти в чат с нашим менеджером. "
-            f"Мы уже передали ему контекст вашей заявки!",
-            keyboard=keyboard,
-            format="html"
-        )
-        
-        admin_text = (
-            f"📞 <b>Запрос связи с менеджером (Макс чат)</b>\n\n"
-            f"Услуга: {selected_service}\n"
-            f"Имя: {data.get('address', 'Не указано')}\n"
-            f"Username: {get_sender_display(message)}"
-        )
-        import asyncio
-        asyncio.create_task(notify_admin(admin_text))
-        
-        state.clear()
+        await handle_call_manager_action(message, state, service_name="Торговый дом (закупка товаров)")
+        return True
     
     elif final_choice == "⬅️ Назад":
         # Go back to currency selection
@@ -1655,69 +1624,8 @@ async def process_customs_final(message):
         return
     
     elif final_choice == "📞 Позвать менеджера":
-        data = state.get_data() or {}
-        selected_service = "Таможенное оформление"
-        
-        # Max Chat URL generation with context
-        max_chat_url = settings.max_chat_url or "https://example.com/max-chat"
-        context_parts = ["Заявка из бота:"]
-        if selected_service and selected_service != 'Не указана':
-            context_parts.append(f"Услуга: {selected_service}")
-        if data.get('address'):
-            context_parts.append(f"Обращение: {data.get('address')}")
-        if data.get('phone'):
-            context_parts.append(f"Телефон: {data.get('phone')}")
-        if data.get('email'):
-            context_parts.append(f"Email: {data.get('email')}")
-        if data.get('user_message'):
-            context_parts.append(f"Сообщение: {data.get('user_message')}")
-        if data.get('product'):
-            context_parts.append(f"Товар: {data.get('product')}")
-        if data.get('country'):
-            context_parts.append(f"Страна: {data.get('country')}")
-        if data.get('amount'):
-            curr = data.get('currency', '')
-            context_parts.append(f"Сумма: {data.get('amount')} {curr}".strip())
-        if data.get('product_name'):
-            context_parts.append(f"Товар: {data.get('product_name')}")
-        if data.get('logistics_interest'):
-            context_parts.append(f"Логистика: {data.get('logistics_interest')}")
-        if data.get('cargo_weight'):
-            context_parts.append(f"Вес: {data.get('cargo_weight')}")
-        if data.get('pickup_location'):
-            context_parts.append(f"Откуда: {data.get('pickup_location')}")
-        if data.get('delivery_location'):
-            context_parts.append(f"Куда: {data.get('delivery_location')}")
-        if data.get('customs_location'):
-            context_parts.append(f"Таможня: {data.get('customs_location')}")
-        if data.get('special_conditions'):
-            context_parts.append(f"Условия: {data.get('special_conditions')}")
-        context_text = "\n".join(context_parts)
-        encoded_text = urllib.parse.quote(context_text)
-        chat_url_with_context = f"{max_chat_url}?text={encoded_text}"
-        
-        keyboard = buttons.Markup([
-            [buttons.LinkButton("Перейти в чат", url=chat_url_with_context)]
-        ])
-        
-        await message.send(
-            f"📞 <b>Связь с менеджером</b>\n\n"
-            f"Пожалуйста, нажмите на кнопку ниже, чтобы перейти в чат с нашим менеджером. "
-            f"Мы уже передали ему контекст вашей заявки!",
-            keyboard=keyboard,
-            format="html"
-        )
-        
-        admin_text = (
-            f"📞 <b>Запрос связи с менеджером (Макс чат)</b>\n\n"
-            f"Услуга: {selected_service}\n"
-            f"Имя: {data.get('address', 'Не указано')}\n"
-            f"Username: {get_sender_display(message)}"
-        )
-        import asyncio
-        asyncio.create_task(notify_admin(admin_text))
-        
-        state.clear()
+        await handle_call_manager_action(message, state, service_name="Таможенное оформление")
+        return True
 
 
 # Manager transfer handlers
@@ -2350,6 +2258,10 @@ async def process_edit_field_selection(message):
             state.change_state(ApplicationStates.waiting_for_customs_final)
         return
     
+    elif field_choice == "📞 Позвать менеджера":
+        await handle_call_manager_action(message, state)
+        return
+    
     # Map field names to data keys and next states
     field_mapping = {
         "📦 Товар": ("product", "Введите название товара:", ApplicationStates.waiting_for_product),
@@ -2433,7 +2345,9 @@ async def process_edit_text(message):
         state.change_state(ApplicationStates.waiting_for_edit_field)
         return
     
-    # Get the field being edited
+    if get_message_text(message) == "📞 Позвать менеджера":
+        await handle_call_manager_action(message, state)
+        return
     data = state.get_data() or {}
     editing_field = data.get('editing_field')
     new_value = get_message_text(message)
